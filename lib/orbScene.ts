@@ -13,6 +13,13 @@ export interface OrbSceneApi {
   zoomIn(): void;
   zoomOut(): void;
   resetView(): void;
+  /** Fist crush: 0 = open/normal, 1 = full fist = tiny orb. */
+  setCrush(amount: number): void;
+  /** Fist snapped open: blow the orb into small pieces. */
+  burst(): void;
+  /** Hold 2+2 fingers to pull the pieces back together. */
+  setRebuilding(active: boolean): void;
+  isExploded(): boolean;
   dispose(): void;
 }
 
@@ -425,6 +432,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     theta: number;
     r: number;
     speed: number;
+    burst: THREE.Vector3;
   }
 
   function makeTextSprite(text: string, size = 0.08) {
@@ -474,6 +482,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
         speed:
           (speedScale[0] + Math.random() * speedScale[1]) *
           (Math.random() > 0.5 ? 1 : -1),
+        burst: randomBurstDir(1),
       } satisfies SpriteDrift;
       group.add(sp);
     }
@@ -525,6 +534,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     tiltX: number;
     tiltZ: number;
     phase: number;
+    burst: THREE.Vector3;
   }
   const debris: THREE.Mesh[] = [];
   for (let i = 0; i < 250; i++) {
@@ -541,7 +551,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     const tiltX = (Math.random() - 0.5) * Math.PI * 0.9;
     const tiltZ = (Math.random() - 0.5) * Math.PI * 0.5;
     const phase = Math.random() * Math.PI * 2;
-    mesh.userData = { orbitR, speed, tiltX, tiltZ, phase } satisfies DebrisOrbit;
+    mesh.userData = { orbitR, speed, tiltX, tiltZ, phase, burst: randomBurstDir(1) } satisfies DebrisOrbit;
     debris.push(mesh);
     orbGroup.add(mesh);
 
@@ -609,6 +619,110 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   });
   const dustPoints = new THREE.Points(dustGeo, dustMat);
   orbGroup.add(dustPoints);
+
+  // ═══════════════════════════════════════════════
+  // GRENADE BLAST — everything becomes dust particles
+  // A dedicated high-count Points cloud that is invisible until
+  // burst() fires, then explodes outward like a grenade, hangs as
+  // smoke/dust, and sucks back into the orb on rebuild.
+  // ═══════════════════════════════════════════════
+  const BLAST_COUNT = 6500;
+  const blastPos = new Float32Array(BLAST_COUNT * 3);
+  const blastOrigin = new Float32Array(BLAST_COUNT * 3);
+  const blastVel = new Float32Array(BLAST_COUNT * 3);
+  const blastCol = new Float32Array(BLAST_COUNT * 3);
+  const blastSeed = new Float32Array(BLAST_COUNT * 2); // turbulence phase + size jitter
+  for (let i = 0; i < BLAST_COUNT; i++) {
+    // park far below until first burst — invisible via opacity 0
+    blastPos[i * 3 + 1] = -999;
+  }
+  const blastGeo = new THREE.BufferGeometry();
+  blastGeo.setAttribute("position", new THREE.BufferAttribute(blastPos, 3));
+  blastGeo.setAttribute("color", new THREE.BufferAttribute(blastCol, 3));
+  const blastMat = new THREE.PointsMaterial({
+    map: new THREE.CanvasTexture(dotC),
+    size: 0.09,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+    vertexColors: true,
+  });
+  const blastPoints = new THREE.Points(blastGeo, blastMat);
+  blastPoints.frustumCulled = false;
+  orbGroup.add(blastPoints);
+
+  let blastAge = 99; // seconds since last burst; 99 = idle
+  const _bd = new THREE.Vector3();
+
+  function seedBlast() {
+    for (let i = 0; i < BLAST_COUNT; i++) {
+      // uniform sphere direction
+      const u = Math.random() * 2 - 1;
+      const th = Math.random() * Math.PI * 2;
+      const s = Math.sqrt(Math.max(0, 1 - u * u));
+      _bd.set(s * Math.cos(th), u, s * Math.sin(th));
+      // start on / slightly inside the orb shell so the whole orb turns to dust
+      const r0 = 0.3 + Math.pow(Math.random(), 0.5) * 1.9;
+      const ox = _bd.x * r0;
+      const oy = _bd.y * r0;
+      const oz = _bd.z * r0;
+      blastOrigin[i * 3] = ox;
+      blastOrigin[i * 3 + 1] = oy;
+      blastOrigin[i * 3 + 2] = oz;
+      blastPos[i * 3] = ox;
+      blastPos[i * 3 + 1] = oy;
+      blastPos[i * 3 + 2] = oz;
+      // grenade velocity: fast radial + upward bias + tangent jitter
+      const speed = 4.5 + Math.random() * 10.5;
+      const jx = (Math.random() - 0.5) * 2.2;
+      const jy = Math.random() * 2.6; // fireball lifts
+      const jz = (Math.random() - 0.5) * 2.2;
+      blastVel[i * 3] = _bd.x * speed + jx;
+      blastVel[i * 3 + 1] = _bd.y * speed + jy;
+      blastVel[i * 3 + 2] = _bd.z * speed + jz;
+      blastSeed[i * 2] = Math.random() * Math.PI * 2;
+      blastSeed[i * 2 + 1] = 0.6 + Math.random() * 0.9;
+      // start white-hot
+      blastCol[i * 3] = 1.0;
+      blastCol[i * 3 + 1] = 0.92;
+      blastCol[i * 3 + 2] = 0.7;
+    }
+    blastGeo.attributes.position.needsUpdate = true;
+    blastGeo.attributes.color.needsUpdate = true;
+    blastAge = 0;
+  }
+
+  // Shockwave: expanding sphere shell + flat ring + flash light
+  const shockMat = new THREE.MeshBasicMaterial({
+    color: 0xffcc88,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    wireframe: true,
+  });
+  const shockSphere = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 18), shockMat);
+  shockSphere.visible = false;
+  scene.add(shockSphere);
+
+  const shockRingMat = new THREE.MeshBasicMaterial({
+    color: 0xffaa30,
+    transparent: true,
+    opacity: 0,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const shockRing = new THREE.Mesh(new THREE.RingGeometry(0.95, 1.05, 96), shockRingMat);
+  shockRing.rotation.x = Math.PI / 2;
+  shockRing.visible = false;
+  scene.add(shockRing);
+
+  const flashLight = new THREE.PointLight(0xffb040, 0, 60, 1.6);
+  scene.add(flashLight);
 
   // ═══════════════════════════════════════════════
   // SCANNING RINGS
@@ -691,6 +805,52 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   }
 
   // ═══════════════════════════════════════════════
+  // GESTURE PHYSICS — crush / burst / rebuild
+  // ═══════════════════════════════════════════════
+  let crushTarget = 0;
+  let crushCurrent = 0;
+  let explodedTarget = 0; // 0 = whole, 1 = blown apart
+  let explodedFactor = 0;
+  let rebuilding = false;
+  let burstFlash = 0;
+
+  function randomBurstDir(power = 1): THREE.Vector3 {
+    const v = new THREE.Vector3(
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+      Math.random() * 2 - 1,
+    );
+    if (v.lengthSq() < 1e-4) v.set(0, 1, 0);
+    return v.normalize().multiplyScalar(power * (1.5 + Math.random() * 3.5));
+  }
+
+  function setCrush(amount: number) {
+    crushTarget = THREE.MathUtils.clamp(amount, 0, 1);
+  }
+
+  function burst() {
+    if (explodedTarget === 1 && blastAge < 1.2) return;
+    explodedTarget = 1;
+    rebuilding = false;
+    burstFlash = 2.2;
+    crushTarget = 0;
+    seedBlast();
+    shockSphere.visible = true;
+    shockRing.visible = true;
+  }
+
+  function setRebuilding(active: boolean) {
+    rebuilding = active;
+    // pull pieces back only if we're actually blown apart
+    if (active && explodedTarget === 1) explodedTarget = 0;
+    else if (!active && explodedFactor > 0.6) explodedTarget = 1;
+  }
+
+  function isExploded() {
+    return explodedTarget === 1 || explodedFactor > 0.1;
+  }
+
+  // ═══════════════════════════════════════════════
   // ANIMATION
   // ═══════════════════════════════════════════════
   const clock = new THREE.Clock();
@@ -702,22 +862,57 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
+    const dt = Math.min(0.05, Math.max(0.001, t - (animate as { _t?: number })._t! || 0.016));
+    (animate as { _t?: number })._t = t;
 
-    // Outer shell rotation
-    outerShell.rotation.y += 0.0015;
+    // ——— gesture physics easing ———
+    crushCurrent += (crushTarget - crushCurrent) * Math.min(1, dt * 6);
+    if (Math.abs(crushTarget - crushCurrent) < 0.001) crushCurrent = crushTarget;
+    // grenade: explode fast, rebuild = slow suction back together
+    const explodeSpeed = explodedTarget === 1 ? 5.0 : rebuilding ? 1.1 : 2.0;
+    explodedFactor += (explodedTarget - explodedFactor) * Math.min(1, dt * explodeSpeed);
+    if (Math.abs(explodedTarget - explodedFactor) < 0.002) explodedFactor = explodedTarget;
+    burstFlash = Math.max(0, burstFlash - dt * 1.1);
+    blastAge += dt;
+
+    // whole-orb scale: fist shrinks, grenade burst dissolves the orb into dust
+    const orbScale = Math.max(
+      0.02,
+      (1 - crushCurrent * 0.68) * (1 - explodedFactor * 0.96),
+    );
+    orbGroup.scale.setScalar(orbScale);
+    const energy = 1 + crushCurrent * 2 + explodedFactor * 3 + burstFlash * 2;
+
+    // GRENADE rule: once blown apart, the wireframe orb is GONE — only dust remains.
+    const orbDissolved = explodedFactor > 0.35;
+    outerShell.visible = !orbDissolved;
+    panelGroup.visible = !orbDissolved;
+    shell2.visible = !orbDissolved;
+    innerCore.visible = !orbDissolved;
+    icoWire.visible = !orbDissolved;
+    coreSphere.visible = !orbDissolved;
+    glowSphere.visible = !orbDissolved;
+    textOuter.visible = !orbDissolved;
+    textInner.visible = !orbDissolved;
+    textAmbient.visible = !orbDissolved;
+    scanRing1.visible = !orbDissolved;
+    scanRing2.visible = !orbDissolved;
+
+    // Outer shell rotation (faster when crushed / burst)
+    outerShell.rotation.y += 0.0015 * energy;
     outerShell.rotation.x = Math.sin(t * 0.08) * 0.05;
 
     // Panel group follows shell but with slight offset
-    panelGroup.rotation.y += 0.0018;
+    panelGroup.rotation.y += 0.0018 * energy;
     panelGroup.rotation.x = Math.sin(t * 0.08 + 0.5) * 0.04;
 
     // Secondary shell counter-rotates slowly
-    shell2.rotation.y -= 0.001;
+    shell2.rotation.y -= 0.001 * energy;
     shell2.rotation.z = Math.sin(t * 0.12) * 0.03;
 
     // Inner core — opposite, faster
-    innerCore.rotation.y -= 0.005;
-    innerCore.rotation.z += 0.002;
+    innerCore.rotation.y -= 0.005 * energy;
+    innerCore.rotation.z += 0.002 * energy;
     innerCore.rotation.x = Math.cos(t * 0.1) * 0.08;
 
     // Innermost wireframe
@@ -744,52 +939,137 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     icoWire.scale.setScalar(1 + surge * 0.6);
     icoWireMat.opacity = Math.min(1, 0.5 + surge * 0.4);
 
-    // Debris orbits
-    debris.forEach((d) => {
+    // Debris: 80% vaporized into dust, 20% survive as fast shrapnel
+    debris.forEach((d, idx) => {
       const u = d.userData as DebrisOrbit;
-      const a = t * u.speed + u.phase;
+      const isShrapnel = idx % 5 === 0;
+      d.visible = explodedFactor < 0.35 || isShrapnel;
+      if (!d.visible) return;
+      const a = t * u.speed * (1 + explodedFactor * 3) + u.phase;
+      const fling = isShrapnel ? explodedFactor * 3.2 : explodedFactor * 0.6;
       d.position.set(
-        u.orbitR * Math.cos(a) * Math.cos(u.tiltX),
-        u.orbitR * Math.sin(u.tiltX) * Math.sin(a * 0.8) + Math.sin(a * 0.3 + u.tiltZ) * 0.2,
-        u.orbitR * Math.sin(a) * Math.cos(u.tiltZ),
+        u.orbitR * Math.cos(a) * Math.cos(u.tiltX) + u.burst.x * fling,
+        u.orbitR * Math.sin(u.tiltX) * Math.sin(a * 0.8) + Math.sin(a * 0.3 + u.tiltZ) * 0.2 + u.burst.y * fling,
+        u.orbitR * Math.sin(a) * Math.cos(u.tiltZ) + u.burst.z * fling,
       );
-      d.rotation.x += 0.015;
-      d.rotation.z += 0.01;
+      const shrink = isShrapnel ? Math.max(0.3, 1 - explodedFactor * 0.5) : 1;
+      d.scale.setScalar(shrink);
+      d.rotation.x += 0.015 * (1 + explodedFactor * 6);
+      d.rotation.z += 0.01 * (1 + explodedFactor * 6);
     });
 
-    // Text drift
-    const driftGroups: [THREE.Group, number][] = [
-      [textOuter, 1],
-      [textInner, 2],
-      [textAmbient, 1.2],
-    ];
-    for (const [group, mult] of driftGroups) {
-      group.children.forEach((sp) => {
-        const u = sp.userData as SpriteDrift;
-        u.theta += u.speed * mult;
-        sp.position.set(
-          u.r * Math.sin(u.phi) * Math.cos(u.theta),
-          u.r * Math.cos(u.phi),
-          u.r * Math.sin(u.phi) * Math.sin(u.theta),
-        );
-      });
+    // Text drift (hidden entirely once dissolved — it became dust)
+    if (!orbDissolved) {
+      const driftGroups: [THREE.Group, number][] = [
+        [textOuter, 1],
+        [textInner, 2],
+        [textAmbient, 1.2],
+      ];
+      for (const [group, mult] of driftGroups) {
+        group.children.forEach((sp) => {
+          const u = sp.userData as SpriteDrift;
+          u.theta += u.speed * mult;
+          sp.position.set(
+            u.r * Math.sin(u.phi) * Math.cos(u.theta),
+            u.r * Math.cos(u.phi),
+            u.r * Math.sin(u.phi) * Math.sin(u.theta),
+          );
+        });
+      }
     }
 
-    // Scan rings sweeping
-    const scanY1 = Math.sin(t * 0.4) * R1;
-    scanRing1.position.y = scanY1;
-    const scanS1 = Math.sqrt(Math.max(0, R1 * R1 - scanY1 * scanY1)) / R1;
-    scanRing1.scale.set(scanS1, scanS1, 1);
-    (scanRing1.material as THREE.MeshBasicMaterial).opacity = 0.2 * scanS1;
+    // Scan rings sweeping (only while whole)
+    if (!orbDissolved) {
+      const scanY1 = Math.sin(t * 0.4) * R1;
+      scanRing1.position.y = scanY1;
+      const scanS1 = Math.sqrt(Math.max(0, R1 * R1 - scanY1 * scanY1)) / R1;
+      scanRing1.scale.set(scanS1, scanS1, 1);
+      (scanRing1.material as THREE.MeshBasicMaterial).opacity = 0.2 * scanS1;
 
-    const scanY2 = Math.sin(t * 0.6 + 2) * R3;
-    scanRing2.position.y = scanY2;
-    const scanS2 = Math.sqrt(Math.max(0, R3 * R3 - scanY2 * scanY2)) / R3;
-    scanRing2.scale.set(scanS2, scanS2, 1);
-    (scanRing2.material as THREE.MeshBasicMaterial).opacity = 0.15 * scanS2;
+      const scanY2 = Math.sin(t * 0.6 + 2) * R3;
+      scanRing2.position.y = scanY2;
+      const scanS2 = Math.sqrt(Math.max(0, R3 * R3 - scanY2 * scanY2)) / R3;
+      scanRing2.scale.set(scanS2, scanS2, 1);
+      (scanRing2.material as THREE.MeshBasicMaterial).opacity = 0.15 * scanS2;
+    }
 
-    // Dust rotation
-    dustPoints.rotation.y += 0.0002;
+    // Ambient dust: violent expansion on burst
+    dustPoints.rotation.y += 0.0002 * (1 + explodedFactor * 10);
+    dustPoints.scale.setScalar(1 + explodedFactor * 4.0);
+    (dustMat as THREE.PointsMaterial).opacity = Math.min(
+      0.9,
+      0.5 + burstFlash * 0.5 + explodedFactor * 0.3,
+    );
+
+    // ——— GRENADE DUST BALL: explode outward, hang, then suck back on rebuild ———
+    if (blastAge < 12) {
+      const posAttr = blastGeo.attributes.position as THREE.BufferAttribute;
+      const colAttr = blastGeo.attributes.color as THREE.BufferAttribute;
+      const damping = rebuilding ? 0.4 : 1.35;
+      for (let i = 0; i < BLAST_COUNT; i++) {
+        const ix = i * 3;
+        if (rebuilding && explodedTarget === 0) {
+          // suction: fly back to the orb surface
+          const k = Math.min(1, dt * 2.2);
+          blastPos[ix] += (blastOrigin[ix] - blastPos[ix]) * k;
+          blastPos[ix + 1] += (blastOrigin[ix + 1] - blastPos[ix + 1]) * k;
+          blastPos[ix + 2] += (blastOrigin[ix + 2] - blastPos[ix + 2]) * k;
+          // cool back toward amber as it regroups
+          blastCol[ix] += (1.0 - blastCol[ix]) * k;
+          blastCol[ix + 1] += (0.62 - blastCol[ix + 1]) * k;
+          blastCol[ix + 2] += (0.15 - blastCol[ix + 2]) * k;
+        } else {
+          // ballistic + drag + turbulence
+          const damp = Math.max(0, 1 - dt * damping);
+          blastVel[ix] *= damp;
+          blastVel[ix + 1] = blastVel[ix + 1] * damp - dt * 0.55;
+          blastVel[ix + 2] *= damp;
+          const ph = blastSeed[i * 2];
+          const turbX = Math.sin(t * 3.1 + ph) * 1.4;
+          const turbZ = Math.cos(t * 2.7 + ph) * 1.4;
+          blastPos[ix] += (blastVel[ix] + turbX) * dt;
+          blastPos[ix + 1] += blastVel[ix + 1] * dt;
+          blastPos[ix + 2] += (blastVel[ix + 2] + turbZ) * dt;
+          // color: white-hot -> orange -> dark smoke with age
+          const age = blastAge;
+          if (age < 0.35) {
+            blastCol[ix] = 1.0; blastCol[ix + 1] = 0.9 - age; blastCol[ix + 2] = 0.7 - age * 1.2;
+          } else if (age < 1.6) {
+            const k = (age - 0.35) / 1.25;
+            blastCol[ix] = 1.0 - k * 0.25; blastCol[ix + 1] = (0.55 - k * 0.3); blastCol[ix + 2] = 0.28 - k * 0.18;
+          } else {
+            const k = Math.min(1, (age - 1.6) / 2.5);
+            blastCol[ix] = 0.75 - k * 0.5; blastCol[ix + 1] = 0.25 - k * 0.13; blastCol[ix + 2] = 0.1 - k * 0.05;
+          }
+        }
+      }
+      posAttr.needsUpdate = true;
+      colAttr.needsUpdate = true;
+      // opacity: punch in hard, linger as dust, fade only when fully rebuilt
+      const rebuiltK = rebuilding ? Math.max(0, 1 - (1 - explodedFactor) * 1.4) : 1;
+      const ageFade = blastAge < 0.15 ? blastAge / 0.15 : Math.max(0.35, 1 - Math.max(0, blastAge - 2.5) * 0.22);
+      blastMat.opacity = Math.min(1, explodedFactor + burstFlash * 0.5 + 0.25) * ageFade * Math.max(0.12, rebuiltK + 0.35);
+      blastMat.size = 0.07 + Math.min(0.12, blastAge * 0.035) + burstFlash * 0.05;
+      blastPoints.visible = blastMat.opacity > 0.02;
+    } else {
+      blastPoints.visible = false;
+    }
+
+    // ——— shockwave + flash ———
+    if (shockSphere.visible) {
+      const sAge = blastAge;
+      const sR = 0.6 + sAge * 14;
+      shockSphere.scale.setScalar(Math.min(16, sR));
+      shockMat.opacity = Math.max(0, 0.55 - sAge * 0.75);
+      const rR = 0.5 + sAge * 17;
+      shockRing.scale.set(Math.min(20, rR), Math.min(20, rR), 1);
+      shockRingMat.opacity = Math.max(0, 0.7 - sAge * 0.9);
+      if (sAge > 0.9) {
+        shockSphere.visible = false;
+        shockRing.visible = false;
+      }
+    }
+    flashLight.intensity = burstFlash * 160 + explodedFactor * 12;
 
     // Random flicker on some panels
     flickerTimer += 0.016;
@@ -802,13 +1082,26 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
       });
     }
 
-    // Bloom pulse
-    bloom.strength = 1.6 + Math.sin(t * 0.8) * 0.3;
+    // Bloom pulse (+ white-hot grenade flash, glow while rebuilding)
+    bloom.strength =
+      1.6 +
+      Math.sin(t * 0.8) * 0.3 +
+      burstFlash * 4.5 +
+      explodedFactor * 0.9 +
+      (rebuilding && explodedFactor > 0.02 ? 0.9 : 0);
 
-    // Update chromatic aberration time
-    chromaticPass.uniforms.uTime.value = t;
+    // Update chromatic aberration time (+ kick on blast)
+    (chromaticPass.uniforms as Record<string, { value: number }>).uTime.value = t;
+    (chromaticPass.uniforms as Record<string, { value: number }>).uIntensity.value =
+      0.003 + burstFlash * 0.008 + explodedFactor * 0.002;
 
     controls.update();
+    // Grenade camera shake — proportional to flash
+    if (burstFlash > 0.01) {
+      camera.position.x += (Math.random() - 0.5) * burstFlash * 0.35;
+      camera.position.y += (Math.random() - 0.5) * burstFlash * 0.35;
+      camera.position.z += (Math.random() - 0.5) * burstFlash * 0.2;
+    }
     composer.render();
   }
 
@@ -853,6 +1146,10 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     zoomIn: () => zoomBy(0.65),
     zoomOut: () => zoomBy(1.55),
     resetView,
+    setCrush,
+    burst,
+    setRebuilding,
+    isExploded,
     dispose,
   };
 }

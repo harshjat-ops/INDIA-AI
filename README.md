@@ -1,12 +1,12 @@
-# ULTRON Orb UI
+# INDIA AI Orb UI
 
 An Iron Man–inspired holographic orb built with **Next.js**, **Three.js**, and **MediaPipe** hand tracking — control it with your bare hands through your webcam.
 
-> 🔮 This is the open-source **interface** of [ULTRON](https://sagartamang.com/projects/ultron) — my AI that talks in real time and controls Android devices by itself. **[Read the write-up](https://sagartamang.com/projects/ultron)** or **[the X post](https://x.com/sagar_builds/status/2077277583646101921)**
+> 🔮 This is the open-source **interface** of [INDIA AI](https://sagartamang.com/projects/ultron) — my AI that talks in real time and controls Android devices by itself. **[Read the write-up](https://sagartamang.com/projects/ultron)** or **[the X post](https://x.com/sagar_builds/status/2077277583646101921)**
 
 > 📱 **[Watch the demo on Instagram](https://www.instagram.com/p/DayJ17OTwvx/)**
 
-![ULTRON orb UI](docs/screenshot.png)
+![INDIA AI orb UI](docs/screenshot.png)
 
 https://github.com/user-attachments/assets/91578a83-9a27-44e8-84b0-96defcfd7366
 

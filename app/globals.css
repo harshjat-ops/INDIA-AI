@@ -19,6 +19,7 @@ body {
   position: fixed;
   inset: 0;
   cursor: grab;
+  touch-action: none; /* lets 1-finger spin + pinch-zoom work on phones */
 }
 
 .orb-root:active {
@@ -133,6 +134,30 @@ body {
   gap: 8px;
 }
 
+.hud-input {
+  height: 44px;
+  width: 220px;
+  padding: 0 12px;
+  background: rgba(20, 10, 0, 0.55);
+  border: 1px solid rgba(255, 170, 48, 0.45);
+  border-radius: 4px;
+  color: #ffcc66;
+  font-family: "Courier New", monospace;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  outline: none;
+  backdrop-filter: blur(2px);
+}
+
+.hud-input::placeholder {
+  color: rgba(255, 170, 48, 0.45);
+}
+
+.hud-input:focus {
+  border-color: #ffcc66;
+  box-shadow: 0 0 14px rgba(255, 150, 30, 0.35);
+}
+
 .hud-hint {
   bottom: 24px;
   left: 24px;
@@ -170,6 +195,65 @@ body {
   width: 120px;
   height: 1px;
   background: linear-gradient(to right, rgba(255, 170, 48, 0.8), transparent);
+}
+
+/* ——— Voice readout ——— */
+.hud-voice {
+  top: 24px;
+  right: 24px;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: right;
+  pointer-events: none;
+}
+
+.voice-line {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  line-height: 1.6;
+  text-shadow: 0 0 8px rgba(255, 170, 48, 0.6);
+}
+
+.voice-transcript {
+  opacity: 0.6;
+  color: #ffcc66;
+}
+
+.voice-reply {
+  color: #ffaa30;
+  border-right: 2px solid rgba(255, 170, 48, 0.5);
+  padding-right: 8px;
+}
+
+.voice-reply.speaking {
+  color: #ffe0a0;
+  border-right-color: #ffcc66;
+  animation: voice-pulse 0.8s ease-in-out infinite alternate;
+}
+
+.voice-reply.thinking {
+  opacity: 0.7;
+  animation: voice-blink 0.5s linear infinite alternate;
+}
+
+@keyframes voice-pulse {
+  from {
+    text-shadow: 0 0 6px rgba(255, 170, 48, 0.6);
+  }
+  to {
+    text-shadow: 0 0 16px rgba(255, 200, 100, 1);
+  }
+}
+
+@keyframes voice-blink {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 0.9;
+  }
 }
 
 .hud-error {
@@ -231,5 +315,40 @@ body {
 @media (max-width: 600px) {
   .hud-hint {
     display: none;
+  }
+  /* Phone layout: controls full-width at bottom, big touch targets */
+  .hud-controls {
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    align-items: stretch;
+  }
+  .hud-row {
+    justify-content: stretch;
+  }
+  .hud-btn {
+    min-height: 48px;
+    flex: 1;
+    font-size: 14px;
+  }
+  .hud-input {
+    flex: 1;
+    width: auto;
+    height: 48px;
+    font-size: 16px; /* stops iOS auto-zoom on focus */
+  }
+  .hud-voice {
+    top: calc(12px + env(safe-area-inset-top));
+    right: 12px;
+    left: 12px;
+    max-width: none;
+  }
+  .hud-title {
+    top: calc(12px + env(safe-area-inset-top));
+    left: 12px;
+  }
+  .camera-panel {
+    width: 140px;
+    height: 105px;
   }
 }
